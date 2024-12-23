@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS Managed Airflow for Slyp
+
+
+Parameters:
+  Env:
+    Type: String
+    Description: The Slyp Environment being deployed to
+
+
+
+
+Resources:
+  AirflowS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'au-com-slyp-${Env}-datalake-mwaa'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+
+  AirflowSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group of Airflow on Private Subnet
+      GroupName: mwaa-security-group'
+      SecurityGroupEgress:
+        CidrIp: 0.0.0.0/0
+        #CidrIpv6: String
+        Description: Allow outbound to all
+        FromPort: -1
+        IpProtocol: -1
+        ToPort: -1
+      SecurityGroupIngress:
+        - CidrIp: 10.100.0.0/16
+          #CidrIpv6: String
+          Description: Allow inbound from any within VPC
+          FromPort: -1
+          IpProtocol: -1
+          ToPort: -1
+      VpcId: !Ref VpcId
+
+  OsAirflowPolicy:
+    DependsOn:
+      - AirflowS3Bucket
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: defines basic Airflow permissions
+      #Groups:
+      ManagedPolicyName: !Sub 'datalake-${Environment}-policy'
+      #Path: String
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: airflow:PublishMetrics
+            Resource: !Sub 'arn:aws:airflow:ap-southeast-2:${AWS::AccountId}:environment/datalake-${Environment}-env'
+
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:List*
+            Resource:
+              - !Sub 'arn:aws:s3:::datalake-${Environment}'
+              - !Sub 'arn:aws:s3:::datalake-${Environment}/*'
+
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+              - logs:GetLogEvents
+              - logs:GetLogRecord
+              - logs:GetLogGroupFields
+              - logs:GetQueryResults
+            Resource:
+              - !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-env-*'
+
+          - Effect: Allow
+            Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+            Resource:
+              - "*"
+
+          - Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource:
+              - "*"
+
+
+          - Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+
+          - Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource: arn:aws:sqs:ap-southeast-2:*:airflow-celery-*
+
+
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - athena:GetTableMetadata
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+            Resource:
+              - !Sub 'arn:aws:s3:::au-com-slyp-*data-datalake-raw-*'
+              - !Sub 'arn:aws:s3:::au-com-slyp-*data-datalake-stg-*'
+              - !Sub 'arn:aws:athena:*:${AWS::AccountId}:datacatalog/AwsDataCatalog'
+              - !Sub 'arn:aws:athena:*:${AWS::AccountId}:workgroup/primary'
+
+          - Effect: Allow
+            Action:
+              - glue:CreateTable
+              - glue:UpdateTable
+              - glue:BatchCreatePartition
+              - glue:CreatePartition
+              - glue:DeletePartition
+              - glue:BatchDeletePartition
+              - glue:UpdatePartition
+              - glue:BatchGetPartition
+              - glue:Get*
+              - glue:DeleteTable
+            Resource:
+              - '*'
+
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub 'arn:aws:lambda:ap-southeast-2:${AWS::AccountId}:function:*'
+
+          - Effect: "Allow"
+            Action:
+              - "sns:Publish"
+            Resource:
+              - "*"
+
+
+  OsAirflowRole:
+    DependsOn:
+      - OsAirflowPolicy
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - airflow-env.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: String
+      ManagedPolicyArns:
+        - !Ref OsAirflowPolicy
+      RoleName: "MWAAExecutionRole""
+
+
+
+  MWAA:
+    DependsOn:
+      - AirflowS3Bucket
+      - OsAirflowRole
+    Type: 'AWS::MWAA::Environment'
+    #
+    Properties:
+      AirflowConfigurationOptions:
+        webserver.default_ui_timezone : Australia/Sydney
+      AirflowVersion: 2.9.2
+      DagS3Path: !Sub 'dag/'
+      EnvironmentClass: mw1.small
+      ExecutionRoleArn: !GetAtt OsAirflowRole.Arn
+      LoggingConfiguration:
+        DagProcessingLogs:
+          CloudWatchLogGroupArn: !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-DAGProcessing'
+          Enabled: true
+          LogLevel: INFO
+        SchedulerLogs:
+          CloudWatchLogGroupArn: !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-Scheduler'
+          Enabled: true
+          LogLevel: WARNING
+        TaskLogs:
+          CloudWatchLogGroupArn: !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-Task'
+          Enabled: true
+          LogLevel: INFO
+        WebserverLogs:
+          CloudWatchLogGroupArn: !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-WebServer'
+          Enabled: true
+          LogLevel: WARNING
+        WorkerLogs:
+          CloudWatchLogGroupArn: !Sub 'arn:aws:logs:ap-southeast-2:${AWS::AccountId}:log-group:airflow-datalake-${Environment}-Worker'
+          Enabled: true
+          LogLevel: WARNING
+      MaxWorkers: 10
+      MinWorkers: 2
+      Name: !Sub 'datalake-mwaa'
+      NetworkConfiguration:
+        SecurityGroupIds:
+          - !Ref AirflowSecurityGroup
+        SubnetIds:
+          - subnet-0884c63b66e350163
+          - subnet-06ec00f2a6788bff5
+      #PluginsS3ObjectVersion: String
+      #PluginsS3Path: String
+      #RequirementsS3ObjectVersion: String
+      RequirementsS3Path: requirements.txt
+      SourceBucketArn: !GetAtt AirflowS3Bucket.Arn
+      #Tags: #inherit
+      WebserverAccessMode: PUBLIC_ONLY
+      WeeklyMaintenanceWindowStart: WED:20:30
+

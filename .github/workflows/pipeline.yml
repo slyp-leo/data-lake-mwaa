@@ -1,0 +1,47 @@
+name: Deployment pipeline
+on:
+  push:
+    branches:
+      - develop
+      - release/**
+      - feature/**
+      - bugfix/**
+
+# Stop concurrent runs on the same branch
+concurrency: ${{ github.ref }}
+
+jobs:
+  # Team deployment
+  teamdata:
+    name: Teamdata - KMS
+    if: |
+      (!startsWith(github.ref_name, 'release/') && !startsWith(github.ref_name, 'hotfix/'))
+    secrets: inherit
+    uses: ./.github/workflows/child.yml
+    with:
+      env: team
+
+  # Integration deployment
+  integrationdata:
+    name: Integration - KMS
+    needs: [teamdata]
+    if: |
+      (startsWith(github.ref_name, 'develop') || startsWith(github.ref_name, 'hotfix/')) &&
+      !failure() && !cancelled()
+    secrets: inherit
+    uses: ./.github/workflows/child-kms.yml
+    with:
+      env: integration
+
+  # Prod deployment
+
+  proddata:
+    name: Proddata - KMS
+    needs: [integrationdata]
+    if: |
+      (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')) &&
+      !failure() && !cancelled()
+    secrets: inherit
+    uses: ./.github/workflows/child-kms.yml
+    with:
+      env: prod

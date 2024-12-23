@@ -1,0 +1,54 @@
+name: KMS Deployment
+on:
+  workflow_call:
+    inputs:
+      env:
+        description: 'The environment to deploy to'
+        type: string
+        required: true
+      aws-account-id-data:
+        description: 'The account id of the aws account to deploy to'
+        type: string
+        required: true
+      aws-region:
+        description: 'The name of the aws region to deploy to'
+        type: string
+        default: ap-southeast-2
+
+jobs:
+
+  deploy:
+    name: Deploy
+    environment: ${{ inputs.env }}
+    runs-on: ubuntu-22.04
+    container: ghcr.io/slypreceipts/ci-node:14
+    steps:
+      - uses: actions/checkout@v3
+      - uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-access-key-id: ${{ secrets.DEPLOYER_AWS_KEY_ACCESS_ID }}
+          aws-secret-access-key: ${{ secrets.DEPLOYER_AWS_SECRET_ACCESS_ID }}
+          aws-region: ${{ inputs.aws-region }}
+          role-to-assume: arn:aws:iam::${{ inputs.aws-account-id-shared }}:role/account-deployer
+          role-duration-seconds: 7200
+      - name: Deploy
+        id: parameters
+        shell: bash
+        env:
+          ENV: ${{ inputs.env }}
+          S3_BUCKET: au-slyp-com-au-${{ inputs.env }}data-shared-deploy
+          STACK_NAME: ${{ inputs.env }}-datalake-mwaa
+        working-directory: service/kms
+        run: |
+          parameter_overrides+=" ForEnv=$ENV"
+          
+          echo $parameter_overrides
+          S3_PREFIX=$STACK_NAME
+
+          sam build -t ./template.yml
+          sam package --output-template-file ./data-resources-transformed.yaml --s3-bucket $S3_BUCKET --s3-prefix $S3_PREFIX
+
+          sam deploy --stack-name=$STACK_NAME \
+          --template ./data-resources-transformed.yaml \
+          --no-fail-on-empty-changeset \
+          $parameter_overrides
